@@ -1,4 +1,5 @@
-﻿using System.IO.Abstractions;
+﻿using System;
+using System.IO.Abstractions;
 using API.Constants;
 using API.Data;
 using API.Helpers;
@@ -76,7 +77,7 @@ public static class ApplicationServiceExtensions
         services.AddScoped<IExternalMetadataService, ExternalMetadataService>();
         services.AddScoped<ISmartCollectionSyncService, SmartCollectionSyncService>();
 
-        services.AddSqLite();
+        services.AddPostgresql();
         services.AddSignalR(opt => opt.EnableDetailedErrors = true);
 
         services.AddEasyCaching(options =>
@@ -102,11 +103,16 @@ public static class ApplicationServiceExtensions
         });
     }
 
-    private static void AddSqLite(this IServiceCollection services)
+    private static void AddPostgresql(this IServiceCollection services)
     {
+        var connectionString = $"Host={Environment.GetEnvironmentVariable("DB_HOST")};" +
+                               $"Port={Environment.GetEnvironmentVariable("DB_PORT")};" +
+                               $"Database={Environment.GetEnvironmentVariable("DB_NAME")};" +
+                               $"Username={Environment.GetEnvironmentVariable("DB_USER")};" +
+                               $"Password={Environment.GetEnvironmentVariable("DB_PASSWORD")}";
         services.AddDbContextPool<DataContext>(options =>
         {
-            options.UseSqlite("Data source=config/kavita.db", builder =>
+            options.UseNpgsql(connectionString, builder =>
             {
                 builder.UseQuerySplittingBehavior(QuerySplittingBehavior.SplitQuery);
             });

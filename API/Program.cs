@@ -1,11 +1,11 @@
 using System;
 using System.Globalization;
+using System.IO;
 using System.IO.Abstractions;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Threading.Tasks;
 using API.Data;
-using API.Data.ManualMigrations;
 using API.Entities;
 using API.Entities.Enums;
 using API.Logging;
@@ -73,56 +73,14 @@ public class Program
 
             try
             {
-                var logger = services.GetRequiredService<ILogger<Program>>();
                 var context = services.GetRequiredService<DataContext>();
-                var pendingMigrations = await context.Database.GetPendingMigrationsAsync();
                 var isDbCreated = await context.Database.CanConnectAsync();
-                if (isDbCreated && pendingMigrations.Any())
-                {
-                    logger.LogInformation("Performing backup as migrations are needed. Backup will be kavita.db in temp folder");
-                    var migrationDirectory = await GetMigrationDirectory(context, directoryService);
-                    directoryService.ExistOrCreate(migrationDirectory);
-
-                    if (!directoryService.FileSystem.File.Exists(
-                            directoryService.FileSystem.Path.Join(migrationDirectory, "kavita.db")))
-                    {
-                        directoryService.CopyFileToDirectory(directoryService.FileSystem.Path.Join(directoryService.ConfigDirectory, "kavita.db"), migrationDirectory);
-                        logger.LogInformation("Database backed up to {MigrationDirectory}", migrationDirectory);
-                    }
-                }
-
-                // Apply Before manual migrations that need to run before actual migrations
                 if (isDbCreated)
                 {
-                    Task.Run(async () =>
-                        {
-                            // Apply all migrations on startup
-                            logger.LogInformation("Running Manual Migrations");
+                    var schemaScript = await File.ReadAllTextAsync("/schema.sql");
 
-                            try
-                            {
-                                // v0.7.14
-                                await MigrateWantToReadExport.Migrate(context, directoryService, logger);
-
-                                // v0.8.2
-                                await ManualMigrateSwitchToWal.Migrate(context, logger);
-                            }
-                            catch (Exception ex)
-                            {
-                                /* Swallow */
-                            }
-
-                            await unitOfWork.CommitAsync();
-                            logger.LogInformation("Running Manual Migrations - complete");
-                        }).GetAwaiter()
-                        .GetResult();
+                    context.Database.ExecuteSqlRaw(schemaScript);
                 }
-
-
-
-                await context.Database.MigrateAsync();
-
-
                 await Seed.SeedRoles(services.GetRequiredService<RoleManager<AppRole>>());
                 await Seed.SeedSettings(context, directoryService);
                 await Seed.SeedThemes(context);
