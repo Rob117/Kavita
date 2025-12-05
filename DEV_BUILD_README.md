@@ -78,6 +78,24 @@ docker run --rm -v "$(pwd)":/src kavita-builder \
 docker build -t kavita .
 ```
 
+## Building for Production (AMD64 from ARM Mac)
+
+If you're on an ARM Mac and need to build an AMD64 image for deployment to x64 Linux servers, use the dedicated production build script:
+
+```bash
+# Build and tag an AMD64 image
+./build_production_amd64.sh spiritian/kavitapg:1.1.1
+
+# Then push to Docker Hub
+docker push spiritian/kavitapg:1.1.1
+```
+
+This script uses `docker buildx` with `--platform linux/amd64` to cross-compile for AMD64, regardless of your host architecture.
+
+### Why is this needed?
+
+The standard `docker build` command creates images for your host architecture. On ARM Macs, this produces ARM64 images that won't run on x64 Linux servers. The `--build-arg TARGETPLATFORM` only controls which binary tarball gets extracted—it doesn't change the actual image architecture.
+
 ## Troubleshooting
 
 ### Package restore errors during clean
