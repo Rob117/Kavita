@@ -25,7 +25,7 @@ docker run --rm -v "$SCRIPT_DIR":/src kavita-builder \
 
 # Build the final runtime image
 echo "=== Building final Docker image ==="
-docker build -t kavita --build-arg TARGETPLATFORM="linux/amd64" "$SCRIPT_DIR"
+docker build -t kavita "$SCRIPT_DIR"
 
 echo "=== Build complete ==="
 echo "Output: $SCRIPT_DIR/_output/kavita-$RID.tar.gz"

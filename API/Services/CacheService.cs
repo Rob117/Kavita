@@ -39,6 +39,14 @@ public interface ICacheService
     string GetBookmarkCachePath(int seriesId);
     IEnumerable<string> GetCachedPages(int chapterId);
     IEnumerable<FileDimensionDto> GetCachedFileDimensions(string cachePath);
+    /// <summary>
+    /// Gets file dimensions for a chapter. First checks the dimension cache (.kavita-dimensions.json),
+    /// then falls back to extracting and reading from cache directory.
+    /// </summary>
+    /// <param name="chapterId">The chapter ID</param>
+    /// <param name="chapter">The chapter with Files populated</param>
+    /// <returns>Collection of file dimensions for all pages in the chapter</returns>
+    IEnumerable<FileDimensionDto> GetFileDimensions(int chapterId, Chapter chapter);
     string GetCachedBookmarkPagePath(int seriesId, int page);
     string GetCachedFile(Chapter chapter);
     public void ExtractChapterFiles(string extractPath, IReadOnlyList<MangaFile> files, bool extractPdfImages = false);
@@ -52,18 +60,20 @@ public class CacheService : ICacheService
     private readonly IDirectoryService _directoryService;
     private readonly IReadingItemService _readingItemService;
     private readonly IBookmarkService _bookmarkService;
+    private readonly IDimensionCacheService _dimensionCacheService;
 
     private static readonly ConcurrentDictionary<int, SemaphoreSlim> ExtractLocks = new();
 
     public CacheService(ILogger<CacheService> logger, IUnitOfWork unitOfWork,
         IDirectoryService directoryService, IReadingItemService readingItemService,
-        IBookmarkService bookmarkService)
+        IBookmarkService bookmarkService, IDimensionCacheService dimensionCacheService)
     {
         _logger = logger;
         _unitOfWork = unitOfWork;
         _directoryService = directoryService;
         _readingItemService = readingItemService;
         _bookmarkService = bookmarkService;
+        _dimensionCacheService = dimensionCacheService;
     }
 
     public IEnumerable<string> GetCachedPages(int chapterId)
@@ -123,6 +133,61 @@ public class CacheService : ICacheService
         _logger.LogDebug("File Dimensions call for {Length} images took {Time}ms", dimensions.Count, sw.ElapsedMilliseconds);
 
         return dimensions;
+    }
+
+    /// <inheritdoc />
+    public IEnumerable<FileDimensionDto> GetFileDimensions(int chapterId, Chapter chapter)
+    {
+        var sw = Stopwatch.StartNew();
+        var allDimensions = new List<FileDimensionDto>();
+        var pageOffset = 0;
+
+        _logger.LogInformation("[CacheService] GetFileDimensions called for chapter {ChapterId} with {FileCount} files",
+            chapterId, chapter.Files.Count);
+
+        foreach (var file in chapter.Files.OrderBy(f => f.FilePath))
+        {
+            _logger.LogDebug("[CacheService] Checking dimension cache for file: {FilePath}, Format: {Format}, LastModifiedUtc: {LastModifiedUtc}",
+                file.FilePath, file.Format, file.LastModifiedUtc);
+
+            var cachedDimensions = _dimensionCacheService.GetCachedDimensions(file);
+            if (cachedDimensions != null)
+            {
+                _logger.LogDebug("[CacheService] Using cached dimensions for {FilePath}: {Count} pages", file.FilePath, cachedDimensions.Count());
+                foreach (var dim in cachedDimensions)
+                {
+                    allDimensions.Add(new FileDimensionDto
+                    {
+                        PageNumber = dim.PageNumber + pageOffset,
+                        Width = dim.Width,
+                        Height = dim.Height,
+                        FileName = dim.FileName,
+                        IsWide = dim.IsWide
+                    });
+                }
+                pageOffset += cachedDimensions.Count();
+            }
+            else
+            {
+                // Fallback: extract and read from cache directory
+                _logger.LogWarning("[CacheService] Dimension cache miss for {FilePath}, falling back to extraction. Chapter {ChapterId}",
+                    file.FilePath, chapterId);
+                var cachePath = GetCachePath(chapterId);
+                if (!_directoryService.Exists(cachePath))
+                {
+                    _logger.LogInformation("[CacheService] Extracting chapter files to {CachePath}", cachePath);
+                    ExtractChapterFiles(cachePath, chapter.Files.ToList());
+                }
+                var result = GetCachedFileDimensions(cachePath);
+                _logger.LogInformation("[CacheService] GetFileDimensions (fallback) for chapter {ChapterId} took {Time}ms, returned {Count} dimensions",
+                    chapterId, sw.ElapsedMilliseconds, result.Count());
+                return result;
+            }
+        }
+
+        _logger.LogInformation("[CacheService] GetFileDimensions (cached) for chapter {ChapterId} with {Count} pages took {Time}ms",
+            chapterId, allDimensions.Count, sw.ElapsedMilliseconds);
+        return allDimensions;
     }
 
     public string GetCachedBookmarkPagePath(int seriesId, int page)

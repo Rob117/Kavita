@@ -208,7 +208,7 @@ public class ReaderController : BaseApiController
         if (chapterId <= 0) return ArraySegment<FileDimensionDto>.Empty;
         var chapter = await _cacheService.Ensure(chapterId, extractPdf);
         if (chapter == null) return NoContent();
-        return Ok(_cacheService.GetCachedFileDimensions(_cacheService.GetCachePath(chapterId)));
+        return Ok(_cacheService.GetFileDimensions(chapterId, chapter));
     }
 
     /// <summary>
@@ -255,7 +255,7 @@ public class ReaderController : BaseApiController
 
         if (includeDimensions)
         {
-            info.PageDimensions = _cacheService.GetCachedFileDimensions(_cacheService.GetCachePath(chapterId));
+            info.PageDimensions = _cacheService.GetFileDimensions(chapterId, chapter);
             info.DoublePairs = _readerService.GetPairs(info.PageDimensions);
         }
 

@@ -32,8 +32,9 @@ public static class ApplicationServiceExtensions
 
         services.AddScoped<IStatsService, StatsService>();
         services.AddScoped<ITaskScheduler, TaskScheduler>();
-        services.AddScoped<ICacheService, CacheService>();
         services.AddScoped<IArchiveService, ArchiveService>();
+        services.AddScoped<IDimensionCacheService, DimensionCacheService>();
+        services.AddScoped<ICacheService, CacheService>();
         services.AddScoped<IBackupService, BackupService>();
         services.AddScoped<ICleanupService, CleanupService>();
         services.AddScoped<IBookService, BookService>();

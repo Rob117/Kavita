@@ -54,13 +54,15 @@ public class ProcessSeries : IProcessSeries
     private readonly IReadingListService _readingListService;
     private readonly IExternalMetadataService _externalMetadataService;
     private readonly ITagManagerService _tagManagerService;
+    private readonly IDimensionCacheService _dimensionCacheService;
 
 
     public ProcessSeries(IUnitOfWork unitOfWork, ILogger<ProcessSeries> logger, IEventHub eventHub,
         IDirectoryService directoryService, ICacheHelper cacheHelper, IReadingItemService readingItemService,
         IFileService fileService, IMetadataService metadataService, IWordCountAnalyzerService wordCountAnalyzerService,
         ICollectionTagService collectionTagService, IReadingListService readingListService,
-        IExternalMetadataService externalMetadataService, ITagManagerService tagManagerService)
+        IExternalMetadataService externalMetadataService, ITagManagerService tagManagerService,
+        IDimensionCacheService dimensionCacheService)
     {
         _unitOfWork = unitOfWork;
         _logger = logger;
@@ -75,6 +77,7 @@ public class ProcessSeries : IProcessSeries
         _readingListService = readingListService;
         _externalMetadataService = externalMetadataService;
         _tagManagerService = tagManagerService;
+        _dimensionCacheService = dimensionCacheService;
     }
 
     /// <summary>
@@ -806,22 +809,59 @@ public class ProcessSeries : IProcessSeries
         if (existingFile != null)
         {
             existingFile.Format = info.Format;
-            if (!forceUpdate && !_fileService.HasFileBeenModifiedSince(existingFile.FilePath, existingFile.LastModified) && existingFile.Pages != 0) return;
+            if (!forceUpdate && !_fileService.HasFileBeenModifiedSince(existingFile.FilePath, existingFile.LastModified) && existingFile.Pages != 0)
+            {
+                // Even if file hasn't changed, generate dimension cache if it doesn't exist
+                if (info.Format == MangaFormat.Archive)
+                {
+                    _logger.LogInformation("[ProcessSeries] File unchanged, checking dimension cache for: {FilePath}", existingFile.FilePath);
+                    var cachedDims = _dimensionCacheService.GetCachedDimensions(existingFile);
+                    if (cachedDims == null)
+                    {
+                        _logger.LogInformation("[ProcessSeries] Dimension cache missing for unchanged file, generating: {FilePath}", existingFile.FilePath);
+                        existingFile.LastModifiedUtc = fileInfo.LastWriteTimeUtc;
+                        _dimensionCacheService.GenerateAndCacheDimensions(existingFile);
+                    }
+                    else
+                    {
+                        _logger.LogDebug("[ProcessSeries] Dimension cache already exists for unchanged file: {FilePath}", existingFile.FilePath);
+                    }
+                }
+                return;
+            }
+            _logger.LogInformation("[ProcessSeries] File modified or force update, processing: {FilePath}, ForceUpdate: {ForceUpdate}", info.FullFilePath, forceUpdate);
             existingFile.Pages = _readingItemService.GetNumberOfPages(info.FullFilePath, info.Format);
             existingFile.Extension = fileInfo.Extension.ToLowerInvariant();
             existingFile.FileName = Parser.Parser.RemoveExtensionIfSupported(existingFile.FilePath);
             existingFile.FilePath = Parser.Parser.NormalizePath(existingFile.FilePath);
             existingFile.Bytes = fileInfo.Length;
+            // Update LastModifiedUtc for cache validation
+            existingFile.LastModifiedUtc = fileInfo.LastWriteTimeUtc;
             // We skip updating DB here with last modified time so that metadata refresh can do it
+
+            // Generate dimension cache for archive files
+            if (info.Format == MangaFormat.Archive)
+            {
+                _logger.LogInformation("[ProcessSeries] Generating dimension cache for modified archive file: {FilePath}", existingFile.FilePath);
+                _dimensionCacheService.GenerateAndCacheDimensions(existingFile);
+            }
         }
         else
         {
-
+            _logger.LogInformation("[ProcessSeries] New file detected: {FilePath}, Format: {Format}", info.FullFilePath, info.Format);
             var file = new MangaFileBuilder(info.FullFilePath, info.Format, _readingItemService.GetNumberOfPages(info.FullFilePath, info.Format))
                 .WithExtension(fileInfo.Extension)
                 .WithBytes(fileInfo.Length)
                 .Build();
+            _logger.LogDebug("[ProcessSeries] New file LastModifiedUtc: {LastModifiedUtc}", file.LastModifiedUtc);
             chapter.Files.Add(file);
+
+            // Generate dimension cache for archive files
+            if (info.Format == MangaFormat.Archive)
+            {
+                _logger.LogInformation("[ProcessSeries] Generating dimension cache for new archive file: {FilePath}", file.FilePath);
+                _dimensionCacheService.GenerateAndCacheDimensions(file);
+            }
         }
     }
 
