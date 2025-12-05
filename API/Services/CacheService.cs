@@ -90,24 +90,24 @@ public class CacheService : ICacheService
             return ArraySegment<FileDimensionDto>.Empty;
         }
 
-        var dimensions = new List<FileDimensionDto>();
+        var dimensionResults = new ConcurrentBag<(int Index, FileDimensionDto Dto)>();
         var originalCacheSize = Cache.MaxFiles;
         try
         {
             Cache.MaxFiles = 0;
-            for (var i = 0; i < files.Length; i++)
+            Parallel.For(0, files.Length, i =>
             {
                 var file = files[i];
                 using var image = Image.NewFromFile(file, memory: false, access: Enums.Access.SequentialUnbuffered);
-                dimensions.Add(new FileDimensionDto()
+                dimensionResults.Add((i, new FileDimensionDto
                 {
                     PageNumber = i,
                     Height = image.Height,
                     Width = image.Width,
                     IsWide = image.Width > image.Height,
                     FileName = file.Replace(cachePath, string.Empty)
-                });
-            }
+                }));
+            });
         }
         catch (Exception ex)
         {
@@ -117,6 +117,8 @@ public class CacheService : ICacheService
         {
             Cache.MaxFiles = originalCacheSize;
         }
+
+        var dimensions = dimensionResults.OrderBy(x => x.Index).Select(x => x.Dto).ToList();
 
         _logger.LogDebug("File Dimensions call for {Length} images took {Time}ms", dimensions.Count, sw.ElapsedMilliseconds);
 
