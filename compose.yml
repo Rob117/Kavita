@@ -17,6 +17,8 @@ services:
       - 80:5000
     depends_on:
       - postgres
+    volumes:
+      - ~/Downloads/frieren/total:/manga
     environment:
       - DB_HOST=postgres
       - DB_PORT=5432
