@@ -73,9 +73,9 @@ public class DimensionCacheService : IDimensionCacheService
     {
         _logger.LogDebug("[DimensionCache] GetCachedDimensions called for {FilePath}, Format: {Format}", mangaFile.FilePath, mangaFile.Format);
 
-        if (mangaFile.Format != MangaFormat.Archive)
+        if (mangaFile.Format != MangaFormat.Archive && mangaFile.Format != MangaFormat.Image)
         {
-            _logger.LogDebug("[DimensionCache] Skipping non-archive format: {Format}", mangaFile.Format);
+            _logger.LogDebug("[DimensionCache] Skipping unsupported format: {Format}", mangaFile.Format);
             return null;
         }
 
@@ -114,14 +114,6 @@ public class DimensionCacheService : IDimensionCacheService
                 return null;
             }
 
-            // Validate cache - check if file has been modified since cache was created
-            if (entry.LastModifiedUtc != mangaFile.LastModifiedUtc)
-            {
-                _logger.LogInformation("[DimensionCache] Dimension cache is stale for {FilePath}. Cache LastModifiedUtc: {CacheTime}, File LastModifiedUtc: {FileTime}",
-                    mangaFile.FilePath, entry.LastModifiedUtc, mangaFile.LastModifiedUtc);
-                return null;
-            }
-
             _logger.LogDebug("[DimensionCache] Successfully retrieved {Count} cached dimensions for {FilePath}",
                 entry.Dimensions.Count, mangaFile.FilePath);
             return entry.Dimensions;
@@ -139,29 +131,40 @@ public class DimensionCacheService : IDimensionCacheService
         _logger.LogInformation("[DimensionCache] GenerateAndCacheDimensions called for file: {FilePath}, Format: {Format}, LastModifiedUtc: {LastModifiedUtc}",
             mangaFile.FilePath, mangaFile.Format, mangaFile.LastModifiedUtc);
 
-        if (mangaFile.Format != MangaFormat.Archive)
+        if (mangaFile.Format != MangaFormat.Archive && mangaFile.Format != MangaFormat.Image)
         {
-            _logger.LogInformation("[DimensionCache] Skipping non-archive format: {Format} for {FilePath}", mangaFile.Format, mangaFile.FilePath);
+            _logger.LogInformation("[DimensionCache] Skipping unsupported format: {Format} for {FilePath}", mangaFile.Format, mangaFile.FilePath);
             return;
         }
 
-        var archiveDirectory = Path.GetDirectoryName(mangaFile.FilePath);
-        if (string.IsNullOrEmpty(archiveDirectory))
+        var directory = Path.GetDirectoryName(mangaFile.FilePath);
+        if (string.IsNullOrEmpty(directory))
         {
             _logger.LogWarning("[DimensionCache] Could not get directory name from {FilePath}", mangaFile.FilePath);
             return;
         }
 
-        var cacheFilePath = GetCacheFilePath(archiveDirectory);
+        var cacheFilePath = GetCacheFilePath(directory);
         _logger.LogInformation("[DimensionCache] Cache file path will be: {CacheFilePath}", cacheFilePath);
 
         try
         {
-            _logger.LogInformation("[DimensionCache] Starting dimension generation for archive: {FilePath}", mangaFile.FilePath);
-            var dimensions = GenerateDimensionsFromArchive(mangaFile.FilePath);
+            List<FileDimensionDto> dimensions;
+
+            if (mangaFile.Format == MangaFormat.Archive)
+            {
+                _logger.LogInformation("[DimensionCache] Starting dimension generation for archive: {FilePath}", mangaFile.FilePath);
+                dimensions = GenerateDimensionsFromArchive(mangaFile.FilePath);
+            }
+            else
+            {
+                _logger.LogInformation("[DimensionCache] Starting dimension generation for image: {FilePath}", mangaFile.FilePath);
+                dimensions = GenerateDimensionFromImage(mangaFile.FilePath);
+            }
+
             if (dimensions.Count == 0)
             {
-                _logger.LogWarning("[DimensionCache] No images found in archive {FilePath}", mangaFile.FilePath);
+                _logger.LogWarning("[DimensionCache] No dimensions generated for {FilePath}", mangaFile.FilePath);
                 return;
             }
 
@@ -169,15 +172,15 @@ public class DimensionCacheService : IDimensionCacheService
                 dimensions.Count, cacheFilePath);
             var cache = ReadOrCreateCache(cacheFilePath);
 
-            var archiveFileName = Path.GetFileName(mangaFile.FilePath);
-            cache.Files[archiveFileName] = new FileDimensionCacheEntry
+            var fileName = Path.GetFileName(mangaFile.FilePath);
+            cache.Files[fileName] = new FileDimensionCacheEntry
             {
                 LastModifiedUtc = mangaFile.LastModifiedUtc,
                 Dimensions = dimensions
             };
 
-            _logger.LogInformation("[DimensionCache] Writing cache to {CacheFilePath} with {Count} entries for file {ArchiveFileName}",
-                cacheFilePath, dimensions.Count, archiveFileName);
+            _logger.LogInformation("[DimensionCache] Writing cache to {CacheFilePath} with {Count} entries for file {FileName}",
+                cacheFilePath, dimensions.Count, fileName);
             WriteCache(cacheFilePath, cache);
             _logger.LogInformation("[DimensionCache] Successfully cached dimensions for {FilePath}: {Count} pages at {CacheFilePath}",
                 mangaFile.FilePath, dimensions.Count, cacheFilePath);
@@ -214,6 +217,40 @@ public class DimensionCacheService : IDimensionCacheService
     {
         var json = JsonSerializer.Serialize(cache, JsonOptions);
         _directoryService.FileSystem.File.WriteAllText(cacheFilePath, json);
+    }
+
+    private List<FileDimensionDto> GenerateDimensionFromImage(string imagePath)
+    {
+        var dimensions = new List<FileDimensionDto>();
+
+        try
+        {
+            var originalCacheSize = Cache.MaxFiles;
+            try
+            {
+                Cache.MaxFiles = 0;
+
+                using var image = Image.NewFromFile(imagePath, access: Enums.Access.SequentialUnbuffered);
+                dimensions.Add(new FileDimensionDto
+                {
+                    PageNumber = 0,
+                    Height = image.Height,
+                    Width = image.Width,
+                    IsWide = image.Width > image.Height,
+                    FileName = "/" + Path.GetFileName(imagePath)
+                });
+            }
+            finally
+            {
+                Cache.MaxFiles = originalCacheSize;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to read dimensions for image {ImagePath}", imagePath);
+        }
+
+        return dimensions;
     }
 
     private List<FileDimensionDto> GenerateDimensionsFromArchive(string archivePath)
