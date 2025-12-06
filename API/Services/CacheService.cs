@@ -47,11 +47,29 @@ public interface ICacheService
     /// <param name="chapter">The chapter with Files populated</param>
     /// <returns>Collection of file dimensions for all pages in the chapter</returns>
     IEnumerable<FileDimensionDto> GetFileDimensions(int chapterId, Chapter chapter);
+
+    /// <summary>
+    /// Attempts to get file dimensions from the dimension cache only, without any fallback to extraction.
+    /// Returns null if any file is missing from the dimension cache.
+    /// </summary>
+    /// <param name="chapter">The chapter with Files populated</param>
+    /// <returns>Collection of file dimensions if all are cached, null otherwise</returns>
+    IEnumerable<FileDimensionDto>? TryGetCachedFileDimensions(Chapter chapter);
     string GetCachedBookmarkPagePath(int seriesId, int page);
     string GetCachedFile(Chapter chapter);
     public void ExtractChapterFiles(string extractPath, IReadOnlyList<MangaFile> files, bool extractPdfImages = false);
     Task<int> CacheBookmarkForSeries(int userId, int seriesId);
     void CleanupBookmarkCache(int seriesId);
+
+    /// <summary>
+    /// For chapters consisting entirely of loose image files, returns the direct source path
+    /// for the requested page without requiring cache extraction.
+    /// </summary>
+    /// <param name="chapter">Chapter with Files populated</param>
+    /// <param name="page">Zero-based page number</param>
+    /// <param name="path">Output: the direct file path if successful</param>
+    /// <returns>True if this is an image-only chapter and path was resolved; false otherwise</returns>
+    bool TryGetImageFilePath(Chapter chapter, int page, out string path);
 }
 public class CacheService : ICacheService
 {
@@ -136,25 +154,23 @@ public class CacheService : ICacheService
     }
 
     /// <inheritdoc />
-    public IEnumerable<FileDimensionDto> GetFileDimensions(int chapterId, Chapter chapter)
+    public IEnumerable<FileDimensionDto>? TryGetCachedFileDimensions(Chapter chapter)
     {
         var sw = Stopwatch.StartNew();
         var allDimensions = new List<FileDimensionDto>();
         var pageOffset = 0;
 
-        _logger.LogInformation("[CacheService] GetFileDimensions called for chapter {ChapterId} with {FileCount} files",
-            chapterId, chapter.Files.Count);
+        var orderedFiles = chapter.Files.OrderBy(f => f.FilePath).ToList();
 
-        foreach (var file in chapter.Files.OrderBy(f => f.FilePath))
+        // Use batch loading to read each cache file only once
+        var cachedDimensionsBatch = _dimensionCacheService.GetCachedDimensionsBatch(orderedFiles);
+
+        foreach (var file in orderedFiles)
         {
-            _logger.LogDebug("[CacheService] Checking dimension cache for file: {FilePath}, Format: {Format}, LastModifiedUtc: {LastModifiedUtc}",
-                file.FilePath, file.Format, file.LastModifiedUtc);
-
-            var cachedDimensions = _dimensionCacheService.GetCachedDimensions(file);
-            if (cachedDimensions != null)
+            if (cachedDimensionsBatch.TryGetValue(file.FilePath, out var cachedDimensions) && cachedDimensions != null)
             {
-                _logger.LogDebug("[CacheService] Using cached dimensions for {FilePath}: {Count} pages", file.FilePath, cachedDimensions.Count());
-                foreach (var dim in cachedDimensions)
+                var dimensionsList = cachedDimensions.ToList();
+                foreach (var dim in dimensionsList)
                 {
                     allDimensions.Add(new FileDimensionDto
                     {
@@ -165,29 +181,50 @@ public class CacheService : ICacheService
                         IsWide = dim.IsWide
                     });
                 }
-                pageOffset += cachedDimensions.Count();
+                pageOffset += dimensionsList.Count;
             }
             else
             {
-                // Fallback: extract and read from cache directory
-                _logger.LogWarning("[CacheService] Dimension cache miss for {FilePath}, falling back to extraction. Chapter {ChapterId}",
-                    file.FilePath, chapterId);
-                var cachePath = GetCachePath(chapterId);
-                if (!_directoryService.Exists(cachePath))
-                {
-                    _logger.LogInformation("[CacheService] Extracting chapter files to {CachePath}", cachePath);
-                    ExtractChapterFiles(cachePath, chapter.Files.ToList());
-                }
-                var result = GetCachedFileDimensions(cachePath);
-                _logger.LogInformation("[CacheService] GetFileDimensions (fallback) for chapter {ChapterId} took {Time}ms, returned {Count} dimensions",
-                    chapterId, sw.ElapsedMilliseconds, result.Count());
-                return result;
+                // Cache miss - return null to indicate fallback is needed
+                _logger.LogDebug("[CacheService] TryGetCachedFileDimensions: cache miss for {FilePath}", file.FilePath);
+                return null;
             }
         }
 
-        _logger.LogInformation("[CacheService] GetFileDimensions (cached) for chapter {ChapterId} with {Count} pages took {Time}ms",
-            chapterId, allDimensions.Count, sw.ElapsedMilliseconds);
+        _logger.LogDebug("[CacheService] TryGetCachedFileDimensions: retrieved {Count} dimensions in {Time}ms",
+            allDimensions.Count, sw.ElapsedMilliseconds);
         return allDimensions;
+    }
+
+    /// <inheritdoc />
+    public IEnumerable<FileDimensionDto> GetFileDimensions(int chapterId, Chapter chapter)
+    {
+        var sw = Stopwatch.StartNew();
+
+        _logger.LogInformation("[CacheService] GetFileDimensions called for chapter {ChapterId} with {FileCount} files",
+            chapterId, chapter.Files.Count);
+
+        // Try to get from cache first
+        var cachedResult = TryGetCachedFileDimensions(chapter);
+        if (cachedResult != null)
+        {
+            _logger.LogInformation("[CacheService] GetFileDimensions (cached) for chapter {ChapterId} with {Count} pages took {Time}ms",
+                chapterId, cachedResult.Count(), sw.ElapsedMilliseconds);
+            return cachedResult;
+        }
+
+        // Fallback: extract and read from cache directory
+        _logger.LogWarning("[CacheService] Dimension cache miss for chapter {ChapterId}, falling back to extraction", chapterId);
+        var cachePath = GetCachePath(chapterId);
+        if (!_directoryService.Exists(cachePath))
+        {
+            _logger.LogInformation("[CacheService] Extracting chapter files to {CachePath}", cachePath);
+            ExtractChapterFiles(cachePath, chapter.Files.ToList());
+        }
+        var result = GetCachedFileDimensions(cachePath);
+        _logger.LogInformation("[CacheService] GetFileDimensions (fallback) for chapter {ChapterId} took {Time}ms, returned {Count} dimensions",
+            chapterId, sw.ElapsedMilliseconds, result.Count());
+        return result;
     }
 
     public string GetCachedBookmarkPagePath(int seriesId, int page)
@@ -445,6 +482,34 @@ public class CacheService : ICacheService
 
         // Since array is 0 based, we need to keep that in account (only affects last image)
         return pageNum >= files.Length ? files[Math.Min(pageNum - 1, files.Length - 1)] : files[pageNum];
+    }
+
+    /// <inheritdoc />
+    public bool TryGetImageFilePath(Chapter chapter, int page, out string path)
+    {
+        path = string.Empty;
+
+        // Only handle chapters where all files are loose images
+        if (chapter.Files == null || chapter.Files.Count == 0)
+            return false;
+
+        if (!chapter.Files.All(f => f.Format == MangaFormat.Image))
+            return false;
+
+        // Sort files naturally by filename (same as cache does)
+        var sortedFiles = chapter.Files
+            .OrderByNatural(f => Path.GetFileNameWithoutExtension(f.FilePath))
+            .ToList();
+
+        if (page < 0) page = 0;
+        if (page >= sortedFiles.Count) page = sortedFiles.Count - 1;
+
+        var file = sortedFiles[page];
+        if (!_directoryService.FileSystem.File.Exists(file.FilePath))
+            return false;
+
+        path = file.FilePath;
+        return true;
     }
 
 

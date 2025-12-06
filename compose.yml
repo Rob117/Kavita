@@ -10,9 +10,7 @@ services:
       - POSTGRES_USER=user_san
       - POSTGRES_DB=database_chan
   kavita:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: kavita
     ports:
       - 80:5000
     depends_on:

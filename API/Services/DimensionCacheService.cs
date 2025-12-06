@@ -27,6 +27,14 @@ public interface IDimensionCacheService
     IEnumerable<FileDimensionDto>? GetCachedDimensions(MangaFile mangaFile);
 
     /// <summary>
+    /// Gets cached dimensions for multiple manga files, loading each cache file only once.
+    /// This is more efficient when processing multiple files from the same directory.
+    /// </summary>
+    /// <param name="mangaFiles">Collection of manga files to get dimensions for</param>
+    /// <returns>Dictionary mapping file path to dimensions (null value means cache miss)</returns>
+    Dictionary<string, IEnumerable<FileDimensionDto>?> GetCachedDimensionsBatch(IEnumerable<MangaFile> mangaFiles);
+
+    /// <summary>
     /// Generates and caches dimensions for a manga file.
     /// </summary>
     void GenerateAndCacheDimensions(MangaFile mangaFile);
@@ -51,6 +59,13 @@ public class DimensionCacheService : IDimensionCacheService
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = true
     };
+
+    /// <summary>
+    /// In-memory cache of loaded dimension cache files, keyed by cache file path.
+    /// Since this service is scoped (per-request), this cache lives for the duration of a single request,
+    /// avoiding repeated file reads when processing multiple files from the same directory.
+    /// </summary>
+    private readonly Dictionary<string, DimensionCacheDto?> _loadedCaches = new();
 
     public DimensionCacheService(
         ILogger<DimensionCacheService> logger,
@@ -87,11 +102,99 @@ public class DimensionCacheService : IDimensionCacheService
         }
 
         var cacheFilePath = GetCacheFilePath(archiveDirectory);
-        _logger.LogDebug("[DimensionCache] Looking for cache file at: {CacheFilePath}", cacheFilePath);
+        var cache = LoadCacheFile(cacheFilePath);
+
+        if (cache == null)
+        {
+            return null;
+        }
+
+        var archiveFileName = Path.GetFileName(mangaFile.FilePath);
+        if (!cache.Files.TryGetValue(archiveFileName, out var entry))
+        {
+            _logger.LogInformation("[DimensionCache] Archive {ArchiveFileName} not found in cache file {CacheFilePath}. Available entries: {Entries}",
+                archiveFileName, cacheFilePath, string.Join(", ", cache.Files.Keys));
+            return null;
+        }
+
+        _logger.LogDebug("[DimensionCache] Successfully retrieved {Count} cached dimensions for {FilePath}",
+            entry.Dimensions.Count, mangaFile.FilePath);
+        return entry.Dimensions;
+    }
+
+    /// <inheritdoc />
+    public Dictionary<string, IEnumerable<FileDimensionDto>?> GetCachedDimensionsBatch(IEnumerable<MangaFile> mangaFiles)
+    {
+        var result = new Dictionary<string, IEnumerable<FileDimensionDto>?>();
+        var filesList = mangaFiles.ToList();
+
+        // Group files by their cache file path to minimize file reads
+        var filesByDirectory = filesList
+            .Where(f => f.Format == MangaFormat.Archive || f.Format == MangaFormat.Image)
+            .GroupBy(f => Path.GetDirectoryName(f.FilePath) ?? string.Empty)
+            .Where(g => !string.IsNullOrEmpty(g.Key));
+
+        var hits = 0;
+        var misses = 0;
+
+        foreach (var directoryGroup in filesByDirectory)
+        {
+            var cacheFilePath = GetCacheFilePath(directoryGroup.Key);
+            var cache = LoadCacheFile(cacheFilePath);
+
+            foreach (var file in directoryGroup)
+            {
+                if (cache == null)
+                {
+                    result[file.FilePath] = null;
+                    misses++;
+                    continue;
+                }
+
+                var fileName = Path.GetFileName(file.FilePath);
+                if (cache.Files.TryGetValue(fileName, out var entry))
+                {
+                    result[file.FilePath] = entry.Dimensions;
+                    hits++;
+                }
+                else
+                {
+                    _logger.LogDebug("[DimensionCache] Batch: File {FileName} not found in cache {CacheFilePath}",
+                        fileName, cacheFilePath);
+                    result[file.FilePath] = null;
+                    misses++;
+                }
+            }
+        }
+
+        // Handle unsupported formats
+        foreach (var file in filesList.Where(f => f.Format != MangaFormat.Archive && f.Format != MangaFormat.Image))
+        {
+            result[file.FilePath] = null;
+            misses++;
+        }
+
+        _logger.LogDebug("[DimensionCache] GetCachedDimensionsBatch: {Hits} hits, {Misses} misses for {Count} files",
+            hits, misses, filesList.Count);
+
+        return result;
+    }
+
+    /// <summary>
+    /// Loads a cache file from disk or returns it from the in-memory cache.
+    /// </summary>
+    private DimensionCacheDto? LoadCacheFile(string cacheFilePath)
+    {
+        // Check in-memory cache first
+        if (_loadedCaches.TryGetValue(cacheFilePath, out var cachedResult))
+        {
+            return cachedResult;
+        }
 
         if (!_directoryService.FileSystem.File.Exists(cacheFilePath))
         {
-            _logger.LogInformation("[DimensionCache] Cache file does not exist: {CacheFilePath}", cacheFilePath);
+            _logger.LogDebug("[DimensionCache] Cache file does not exist: {CacheFilePath}", cacheFilePath);
+            _loadedCaches[cacheFilePath] = null;
             return null;
         }
 
@@ -103,24 +206,17 @@ public class DimensionCacheService : IDimensionCacheService
             if (cache == null || cache.Version != CurrentCacheVersion)
             {
                 _logger.LogWarning("[DimensionCache] Cache file invalid or wrong version at {CacheFilePath}", cacheFilePath);
+                _loadedCaches[cacheFilePath] = null;
                 return null;
             }
 
-            var archiveFileName = Path.GetFileName(mangaFile.FilePath);
-            if (!cache.Files.TryGetValue(archiveFileName, out var entry))
-            {
-                _logger.LogInformation("[DimensionCache] Archive {ArchiveFileName} not found in cache file {CacheFilePath}. Available entries: {Entries}",
-                    archiveFileName, cacheFilePath, string.Join(", ", cache.Files.Keys));
-                return null;
-            }
-
-            _logger.LogDebug("[DimensionCache] Successfully retrieved {Count} cached dimensions for {FilePath}",
-                entry.Dimensions.Count, mangaFile.FilePath);
-            return entry.Dimensions;
+            _loadedCaches[cacheFilePath] = cache;
+            return cache;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[DimensionCache] Failed to read dimension cache from {CacheFilePath}", cacheFilePath);
+            _loadedCaches[cacheFilePath] = null;
             return null;
         }
     }

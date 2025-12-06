@@ -115,15 +115,27 @@ public class ReaderController : BaseApiController
 
         try
         {
-            var chapter = await _cacheService.Ensure(chapterId, extractPdf);
+            // For image-only chapters, serve directly from source without cache extraction
+            var chapter = await _unitOfWork.ChapterRepository.GetChapterAsync(chapterId);
+            if (chapter == null) return NoContent();
+
+            if (_cacheService.TryGetImageFilePath(chapter, page, out var directPath))
+            {
+                _logger.LogInformation("Fetching Page {PageNum} on Chapter {ChapterId} (direct)", page, chapterId);
+                var format = Path.GetExtension(directPath);
+                return PhysicalFile(directPath, MimeTypeMap.GetMimeType(format), Path.GetFileName(directPath), true);
+            }
+
+            // Fall back to cache extraction for archives/PDFs
+            chapter = await _cacheService.Ensure(chapterId, extractPdf);
             if (chapter == null) return NoContent();
             _logger.LogInformation("Fetching Page {PageNum} on Chapter {ChapterId}", page, chapterId);
             var path = _cacheService.GetCachedPagePath(chapter.Id, page);
             if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path))
                 return BadRequest(await _localizationService.Translate(userId, "no-image-for-page", page));
-            var format = Path.GetExtension(path);
+            var pathFormat = Path.GetExtension(path);
 
-            return PhysicalFile(path, MimeTypeMap.GetMimeType(format), Path.GetFileName(path), true);
+            return PhysicalFile(path, MimeTypeMap.GetMimeType(pathFormat), Path.GetFileName(path), true);
         }
         catch (Exception)
         {
@@ -224,7 +236,27 @@ public class ReaderController : BaseApiController
     public async Task<ActionResult<ChapterInfoDto>> GetChapterInfo(int chapterId, bool extractPdf = false, bool includeDimensions = false)
     {
         if (chapterId <= 0) return Ok(null); // This can happen occasionally from UI, we should just ignore
-        var chapter = await _cacheService.Ensure(chapterId, extractPdf);
+
+        // Optimization: If only dimensions are requested and they're cached, skip the expensive Ensure call
+        Chapter? chapter = null;
+        IEnumerable<FileDimensionDto>? cachedDimensions = null;
+
+        if (includeDimensions)
+        {
+            // First, try to get dimensions from cache without extracting files
+            chapter = await _unitOfWork.ChapterRepository.GetChapterAsync(chapterId);
+            if (chapter != null)
+            {
+                cachedDimensions = _cacheService.TryGetCachedFileDimensions(chapter);
+            }
+        }
+
+        // If dimensions aren't cached or we need to extract PDFs, call Ensure
+        if (cachedDimensions == null || extractPdf)
+        {
+            chapter = await _cacheService.Ensure(chapterId, extractPdf);
+        }
+
         if (chapter == null) return NoContent();
 
         var dto = await _unitOfWork.ChapterRepository.GetChapterInfoDtoAsync(chapterId);
@@ -255,7 +287,8 @@ public class ReaderController : BaseApiController
 
         if (includeDimensions)
         {
-            info.PageDimensions = _cacheService.GetFileDimensions(chapterId, chapter);
+            // Use cached dimensions if we have them, otherwise fetch (which may trigger extraction)
+            info.PageDimensions = cachedDimensions ?? _cacheService.GetFileDimensions(chapterId, chapter);
             info.DoublePairs = _readerService.GetPairs(info.PageDimensions);
         }
 
